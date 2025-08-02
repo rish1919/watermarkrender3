@@ -1,16 +1,7 @@
-import json, os
-
-CODES_FILE = "codes.json"
-WATERMARK_PATH = "watermarks/watermark.png"
-OWNER_ID = 7537050026
-
-def is_owner(user_id):
-    return user_id == OWNER_ID
-
-def set_watermark(path):
-    os.makedirs("watermarks", exist_ok=True)
-    with open("wm.json", "w") as f:
-        json.dump({"path": path}, f)
+import os
+import json
+import random
+import string
 
 def get_watermark():
     if os.path.exists("wm.json"):
@@ -18,34 +9,61 @@ def get_watermark():
             data = json.load(f)
         return data.get("path")
 
-def delete_watermark():
-    if os.path.exists("wm.json"):
-        os.remove("wm.json")
+def save_watermark(path):
+    with open("wm.json", "w") as f:
+        json.dump({"path": path}, f)
 
-def load_code_data():
-    if os.path.exists(CODES_FILE):
-        with open(CODES_FILE) as f:
-            return json.load(f)
-    return {}
+def caption_enabled():
+    if os.path.exists("caption.json"):
+        with open("caption.json") as f:
+            return json.load(f).get("enabled", True)
+    return True
 
-def save_code_data(data):
-    with open(CODES_FILE, "w") as f:
+def toggle_caption():
+    current = caption_enabled()
+    with open("caption.json", "w") as f:
+        json.dump({"enabled": not current}, f)
+    return not current
+
+def is_owner(user_id):
+    return user_id == 7537050026
+
+def generate_code():
+    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    data = {}
+    if os.path.exists("codes.json"):
+        with open("codes.json") as f:
+            data = json.load(f)
+    data[code] = {"used": False}
+    with open("codes.json", "w") as f:
         json.dump(data, f)
+    return code
 
-def is_authorized_channel(chat_id):
-    data = load_code_data()
-    for _, entry in data.items():
-        if entry.get("channel_id") == chat_id:
-            return True
-    return False
+def validate_code(code, user_id):
+    if not os.path.exists("codes.json"):
+        return "❌ No codes found."
+    with open("codes.json") as f:
+        codes = json.load(f)
 
-def verify_code(code, user_id):
-    data = load_code_data()
-    if code not in data:
-        return False, "❌ Invalid or expired code."
-    if data[code].get("used"):
-        return False, "❌ Code already used."
-    data[code]["used"] = True
-    data[code]["channel_id"] = user_id
-    save_code_data(data)
-    return True, "✅ Code claimed. You can now use watermark features in your channel."
+    if code not in codes:
+        return "❌ Invalid code."
+
+    if codes[code]["used"]:
+        return "⚠️ Code already used."
+
+    if not os.path.exists("claimed.json"):
+        claimed = []
+    else:
+        with open("claimed.json") as f:
+            claimed = json.load(f)
+
+    claimed.append(str(user_id))
+
+    with open("claimed.json", "w") as f:
+        json.dump(claimed, f)
+
+    codes[code]["used"] = True
+    with open("codes.json", "w") as f:
+        json.dump(codes, f)
+
+    return "✅ Code claimed! Watermarking is now active in your channel."
