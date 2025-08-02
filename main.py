@@ -3,132 +3,93 @@ import json
 import logging
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from watermark_utils import apply_watermark_to_image, apply_watermark_to_video
-from utils import load_config, save_config, is_owner, generate_code
+from watermark_utils import add_watermark_to_image, add_watermark_to_video
+from utils import is_owner, get_watermark_path, caption_enabled, toggle_caption, save_watermark
+from claim_utils import validate_code
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# ====== CONFIG ======
-BOT_TOKEN = "8413346186:AAFnzBn8rnj32W6XGpA5uXJI3EBhKCvwpg0"
-OWNER_ID = 7537050026
-APP_ID = 20712463
-APP_HASH = "bee29238bf0db4a82548c2ffe29d43c1"
-CONFIG_FILE = "config.json"
-CODES_FILE = "codes.json"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
 
-if not os.path.exists(CONFIG_FILE):
-    save_config({})
-
-if not os.path.exists(CODES_FILE):
-    with open(CODES_FILE, "w") as f:
-        json.dump({}, f)
-
-config = load_config()
-bot = Client("watermark_bot", api_id=APP_ID, api_hash=APP_HASH, bot_token=BOT_TOKEN)
-
-
-# ====== UTILITY FUNCTIONS ======
-def load_codes():
-    with open(CODES_FILE, "r") as f:
-        return json.load(f)
-
-
-def save_codes(codes):
-    with open(CODES_FILE, "w") as f:
-        json.dump(codes, f, indent=4)
-
-
-# ====== COMMANDS ======
+bot = Client("watermark_bot", bot_token=BOT_TOKEN, api_id=API_ID, api_hash=API_HASH)
 
 @bot.on_message(filters.command("start"))
-async def start(client, message: Message):
-    await message.reply("👋 Welcome to the Watermark Bot.\n\nUse /claimcode <code> to activate watermarking in your channel.")
+async def start_handler(client, message: Message):
+    await message.reply_text("👋 Welcome to the Watermark Bot!\nSend /setwm to upload your watermark PNG.\nUse /claimcode CODE to activate the bot in your channel.")
 
+@bot.on_message(filters.command("setwm") & filters.private & is_owner)
+async def set_watermark_handler(client, message: Message):
+    if message.reply_to_message and message.reply_to_message.document:
+        file = await message.reply_to_message.download()
+        save_watermark(file)
+        await message.reply("✅ Watermark saved successfully.")
+    else:
+        await message.reply("⚠️ Reply to a PNG file with /setwm.")
 
-@bot.on_message(filters.command("setwm") & filters.user(OWNER_ID))
-async def set_watermark(client, message: Message):
-    if not message.reply_to_message or not message.reply_to_message.document:
-        return await message.reply("Please reply to a PNG file to set as watermark.")
-    
-    file = await message.reply_to_message.download(file_name="watermark.png")
-    config["watermark_path"] = file
-    save_config(config)
-    await message.reply("✅ Watermark set successfully.")
-
-
-@bot.on_message(filters.command("showwm"))
+@bot.on_message(filters.command("showwm") & filters.private & is_owner)
 async def show_watermark(client, message: Message):
-    wm = config.get("watermark_path")
-    if wm and os.path.exists(wm):
-        await message.reply_photo(photo=wm, caption="🖼 Current Watermark")
+    path = get_watermark_path()
+    if os.path.exists(path):
+        await message.reply_photo(photo=path, caption="🖼 Current watermark")
     else:
-        await message.reply("❌ No watermark set.")
+        await message.reply("⚠️ No watermark is set.")
 
-
-@bot.on_message(filters.command("dltwm") & filters.user(OWNER_ID))
+@bot.on_message(filters.command("dltwm") & filters.private & is_owner)
 async def delete_watermark(client, message: Message):
-    wm = config.get("watermark_path")
-    if wm and os.path.exists(wm):
-        os.remove(wm)
-    config["watermark_path"] = None
-    save_config(config)
-    await message.reply("🗑 Watermark deleted.")
-
-
-@bot.on_message(filters.command("caption"))
-async def toggle_caption(client, message: Message):
-    status = message.text.split(" ")[-1].lower()
-    if status == "on":
-        config["caption"] = True
-        await message.reply("✅ Captions will be included.")
-    elif status == "off":
-        config["caption"] = False
-        await message.reply("🚫 Captions will be excluded.")
+    path = get_watermark_path()
+    if os.path.exists(path):
+        os.remove(path)
+        await message.reply("🗑 Watermark deleted.")
     else:
-        await message.reply("Usage: `/caption on` or `/caption off`")
-    save_config(config)
+        await message.reply("⚠️ No watermark to delete.")
 
+@bot.on_message(filters.command("caption") & filters.private & is_owner)
+async def toggle_caption_handler(client, message: Message):
+    args = message.text.split()
+    if len(args) != 2 or args[1].lower() not in ["on", "off"]:
+        await message.reply("Usage: /caption on or /caption off")
+        return
+    toggle_caption(args[1].lower() == "on")
+    await message.reply(f"✅ Caption turned {args[1].lower()}.")
 
-@bot.on_message(filters.command("claimcode"))
-async def claim_code(client, message: Message):
-    if len(message.command) < 2:
-        return await message.reply("Usage: `/claimcode CODE`")
-    code = message.command[1].strip().upper()
-
-    codes = load_codes()
-    if code in codes and not codes[code]["used"]:
-        chat_id = message.chat.id
-        config["authorized_channel"] = chat_id
-        codes[code]["used"] = True
-        save_codes(codes)
-        save_config(config)
-        await message.reply("✅ Code claimed successfully. Watermarking is now active in this channel.")
+@bot.on_message(filters.command("claimcode") & filters.private)
+async def claim_code_handler(client, message: Message):
+    args = message.text.split()
+    if len(args) != 2:
+        await message.reply("❌ Usage: /claimcode YOUR_CODE")
+        return
+    code = args[1].strip().upper()
+    chat_id = message.chat.id
+    success = validate_code(code, chat_id)
+    if success:
+        await message.reply("✅ Code claimed! Watermarking activated in your channel.")
     else:
         await message.reply("❌ Invalid or already used code.")
 
+@bot.on_message(filters.channel)
+async def watermark_channel_post(client, message: Message):
+    chat_id = message.chat.id
+    with open("claimed.json", "r") as f:
+        claimed = json.load(f)
+    if str(chat_id) not in claimed:
+        return
 
-# ====== MEDIA HANDLING ======
-
-@bot.on_message(filters.channel & filters.media)
-async def watermark_handler(client, message: Message):
-    if str(message.chat.id) != str(config.get("authorized_channel")):
-        return  # Not authorized
-
-    wm_path = config.get("watermark_path")
-    if not wm_path or not os.path.exists(wm_path):
+    path = get_watermark_path()
+    if not os.path.exists(path):
         return
 
     try:
         if message.photo:
-            output = await apply_watermark_to_image(message, wm_path)
-            await message.reply_photo(output, caption=message.caption if config.get("caption", True) else None)
+            output = add_watermark_to_image(message)
+            await client.send_photo(chat_id, photo=output, caption=message.caption if caption_enabled() else None)
         elif message.video:
-            output = await apply_watermark_to_video(message, wm_path)
-            await message.reply_video(output, caption=message.caption if config.get("caption", True) else None)
+            output = await add_watermark_to_video(message)
+            await client.send_video(chat_id, video=output, caption=message.caption if caption_enabled() else None)
     except Exception as e:
-        logging.exception("Watermarking failed")
-        await message.reply("❌ Failed to apply watermark.")
+        logger.error(f"❌ Error processing message: {e}")
 
-
-# ====== START ======
-bot.run()
+if __name__ == "__main__":
+    bot.run()
